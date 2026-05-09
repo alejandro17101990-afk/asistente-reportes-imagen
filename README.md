@@ -1,2 +1,5 @@
-# asistente-reportes-imagen
-Asistente reportes imagen 
+streamlit
+python-docx
+openai
+SpeechRecognition
+streamlit-quill

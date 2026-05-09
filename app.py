@@ -1,163 +1,188 @@
 import streamlit as st
-import google.generativeai as genai
-import time
+from docx import Document
+import speech_recognition as sr
+from openai import OpenAI
+from streamlit_quill import st_quill
 
-# 1. CONFIGURACIÓN ESTÉTICA (PACS DARK MODE)
-st.set_page_config(page_title="Radiology AI PACS", layout="wide", initial_sidebar_state="expanded")
+# 1. CONFIGURACIÓN DE PÁGINA
+st.set_page_config(page_title="Radiology AI Workspace", layout="wide", initial_sidebar_state="expanded")
 
-# Inyección de CSS para diseño premium y minimalista
+# 2. INYECCIÓN DE CSS (DISEÑO PREMIUM BASADO EN LA IMAGEN)
 st.markdown("""
     <style>
-    /* Fondo principal y tipografía */
+    /* Fondo general oscuro estilo Deep Blue/Black */
     .stApp {
-        background-color: #0b0b0f;
-        color: #cbd5e1;
-        font-family: 'Inter', sans-serif;
+        background-color: #08080c;
+        color: #e2e8f0;
+        font-family: 'Inter', -apple-system, sans-serif;
     }
     
-    /* Paneles laterales y contenedores */
+    /* Panel lateral oscuro */
     [data-testid="stSidebar"] {
-        background-color: #111116;
-        border-right: 1px solid #1f1f27;
+        background-color: #0d0d12;
+        border-right: 1px solid #1f1f2e;
     }
     
-    /* Estilo para los paneles (Glassmorphism ligero) */
-    .pacs-panel {
-        background: rgba(17, 17, 22, 0.7);
-        border: 1px solid rgba(139, 92, 246, 0.2);
-        border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 20px;
-    }
-
-    /* Títulos y acentos */
-    h1, h2, h3 {
-        color: #ffffff !important;
-        font-weight: 600 !important;
-    }
-    
+    /* Botón principal azul brillante (estilo "Save configuration") */
     .stButton>button {
-        background-color: #8b5cf6 !important;
+        background-color: #1d4ed8 !important;
         color: white !important;
         border-radius: 8px !important;
         border: none !important;
+        padding: 0.5rem 1rem !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease;
         width: 100%;
-        transition: 0.3s;
     }
-    
     .stButton>button:hover {
-        background-color: #7c3aed !important;
-        box-shadow: 0 0 15px rgba(139, 92, 246, 0.4);
+        background-color: #2563eb !important;
+        box-shadow: 0 0 15px rgba(37, 99, 235, 0.4);
     }
 
-    /* Editor de texto */
-    .stTextArea textarea {
-        background-color: #16161d !important;
-        color: #e2e8f0 !important;
-        border: 1px solid #2d2d39 !important;
+    /* Tarjetas/Contenedores (Glassmorphism sutil) */
+    div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] {
+        background-color: #12121a;
+        border: 1px solid #232336;
+        border-radius: 12px;
+        padding: 20px;
+    }
+
+    /* Inputs y Text Areas */
+    .stTextInput input, .stSelectbox div[data-baseweb="select"], .stTextArea textarea {
+        background-color: #0f0f14 !important;
+        color: #f8fafc !important;
+        border: 1px solid #2a2a3f !important;
         border-radius: 8px !important;
-        font-family: 'Courier New', monospace;
+    }
+    
+    /* Títulos limpios */
+    h1, h2, h3 {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.5px;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. LÓGICA DE SESIÓN (Para mantener el reporte editable)
-if 'reporte_final' not in st.session_state:
-    st.session_state.reporte_final = ""
+# 3. FUNCIONES AUXILIARES
+def leer_word(file):
+    doc = Document(file)
+    return '\n'.join([para.text for para in doc.paragraphs])
 
-# 3. BARRA LATERAL (Configuración y RADS)
+def transcribir_audio(audio_file):
+    r = sr.Recognizer()
+    with sr.AudioFile(audio_file) as source:
+        audio_data = r.record(source)
+        try:
+            return r.recognize_google(audio_data, language="es-MX")
+        except sr.UnknownValueError:
+            return "[No se detectó voz clara]"
+        except Exception as e:
+            return f"[Error: {e}]"
+
+# 4. VARIABLES DE ESTADO
+if 'reporte_generado' not in st.session_state:
+    st.session_state.reporte_generado = ""
+
+# 5. BARRA LATERAL (Herramientas e Integraciones)
 with st.sidebar:
-    st.title("⚙️ Panel de Control")
-    api_key = st.text_input("Google API Key", type="password")
+    st.title("🌌 Plataforma IA")
+    
+    st.caption("CONFIGURACIÓN DE HERRAMIENTA")
+    try:
+        api_key = st.secrets["deepseek_key"]
+        st.success("DeepSeek: Conectado 🟢")
+    except Exception:
+        api_key = st.text_input("DeepSeek API Key", type="password")
     
     st.divider()
-    st.subheader("📚 Panel de Referencia")
-    tab_rads, tab_diff = st.tabs(["RADS", "Diferenciales"])
+    st.caption("PLANTILLAS Y CONTEXTO")
+    archivo_plantilla = st.file_uploader("Cargar Plantilla (.docx, .txt)", type=["docx", "txt"])
     
-    with tab_rads:
-        st.caption("Guías rápidas de clasificación")
-        rad_select = st.selectbox("Seleccionar escala:", ["BI-RADS", "PI-RADS", "LI-RADS", "Lung-RADS"])
-        st.info(f"Mostrando criterios para {rad_select}...")
-        
-    with tab_diff:
-        st.caption("Sugerencias automáticas")
-        st.write("• Quiste vs Sólido\n• Infeccioso vs Neoplásico")
+    plantilla_contenido = ""
+    if archivo_plantilla:
+        if archivo_plantilla.name.endswith(".docx"):
+            plantilla_contenido = leer_word(archivo_plantilla)
+        else:
+            plantilla_contenido = archivo_plantilla.read().decode("utf-8")
+        st.success("Plantilla activa ✅")
 
-# 4. CUERPO PRINCIPAL (Layout Dual)
+# 6. ESPACIO DE TRABAJO PRINCIPAL
 if api_key:
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-    # Encabezado Médico
-    col_title, col_status = st.columns([3, 1])
-    with col_title:
-        st.title("🩺 Estación de Trabajo Radiológica IA")
-    with col_status:
-        st.success("IA Conectada")
+    st.title("Configurar Reporte")
+    st.write("Personaliza, define y dicta los hallazgos para potenciar el análisis clínico.")
 
-    # Layout de Paneles
-    panel_izq, panel_der = st.columns([1, 1.2], gap="large")
+    # División estilo Workspace (Izquierda: Inputs, Derecha: Editor Enriquecido)
+    col_input, col_output = st.columns([1.1, 1.3], gap="large")
 
-    with panel_izq:
-        st.subheader("🎙️ Transcripción & Dictado")
+    with col_input:
+        st.subheader("Entrada de Datos")
         
-        # Selector de Modalidad y Subespecialidad
+        # Parámetros del estudio
         mod_col, sub_col = st.columns(2)
         with mod_col:
-            modalidad = st.selectbox("Modalidad", ["Rayos X", "Tomografía", "Resonancia", "Ultrasonido", "US Doppler", "Fluoroscopia"])
+            modalidad = st.selectbox("Modalidad", ["Tomografía", "Resonancia", "Rayos X", "Ultrasonido", "Fluoroscopia"])
         with sub_col:
-            subesp = st.selectbox("Subespecialidad", ["Neurorradiología", "MSK", "Tórax", "Abdomen", "Ultrasonido"])
+            estilo = st.selectbox("Estilo", ["Conciso", "Académico", "Institucional"])
         
-        # Área de entrada (Audio o Texto)
-        audio_file = st.audio_input("Dictar hallazgos (Presiona para iniciar)")
-        hallazgos_dictado = st.text_area("Hallazgos crudos / Notas:", height=200, placeholder="Dicta o escribe aquí tus hallazgos...")
+        # Dictado y Notas
+        st.write("🎙️ **Voz a texto**")
+        audio_file = st.audio_input("Grabar hallazgos")
         
-        # Opciones de IA
-        comp_col, style_col = st.columns(2)
-        with comp_col:
-            complejidad = st.select_slider("Complejidad", options=["Residente", "Adjunto", "Fellow", "Experto"])
-        with style_col:
-            estilo = st.selectbox("Estilo", ["Conciso", "Académico", "Institucional", "Fellow MSK"])
+        st.write("📝 **Notas adicionales**")
+        notas_texto = st.text_area("Define el contexto o hallazgos específicos...", height=120)
 
-        if st.button("🪄 Generar Reporte Estructurado"):
-            with st.spinner("Procesando con IA Radiológica..."):
-                prompt = f"""
-                Actúa como un Radiólogo {complejidad} con subespecialidad en {subesp}.
-                Genera un informe estructurado para {modalidad} en estilo {estilo}.
-                
-                Instrucciones específicas:
-                1. Corrige gramática médica.
-                2. Genera una descripción detallada.
-                3. Incluye una conclusión automática inteligente.
-                4. Si aplica, sugiere diagnósticos diferenciales.
-                
-                Información proporcionada: {hallazgos_dictado}
-                """
-                
-                inputs = [prompt]
+        # Botón de acción principal
+        if st.button("Procesar y Generar Reporte"):
+            with st.spinner("Procesando con DeepSeek AI..."):
+                texto_dictado = ""
                 if audio_file:
-                    inputs.append({"mime_type": "audio/wav", "data": audio_file.getvalue()})
-                
-                response = model.generate_content(inputs)
-                st.session_state.reporte_final = response.text
+                    texto_dictado = transcribir_audio(audio_file)
+                    st.info(f"**Voz detectada:** {texto_dictado}")
 
-    with panel_der:
-        st.subheader("📄 Editor de Informe Generado")
+                hallazgos = f"Notas: {notas_texto}\nDictado: {texto_dictado}"
+                
+                if not notas_texto and not texto_dictado:
+                    st.warning("Por favor, ingresa notas o dicta hallazgos.")
+                else:
+                    prompt = f"""
+                    Eres un Médico Radiólogo experto. Genera un informe estructurado de {modalidad} en estilo {estilo}.
+                    PLANTILLA INSTITUCIONAL: {plantilla_contenido if plantilla_contenido else "Usa estructura estándar médica."}
+                    HALLAZGOS: {hallazgos}
+                    
+                    INSTRUCCIONES:
+                    - Usa formato HTML básico para resaltar texto (usa <b> para negritas en títulos, <br> para saltos de línea).
+                    - Devuelve solo el reporte clínico, sin comentarios extra.
+                    """
+
+                    response = client.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": "Genera el reporte."}
+                        ],
+                        temperature=0.2
+                    )
+                    
+                    st.session_state.reporte_generado = response.choices[0].message.content
+
+    with col_output:
+        st.subheader("</> Redacción del Reporte")
+        st.caption("Salida generada por IA")
         
-        # Botones de acción rápida
-        btn_col1, btn_col2, btn_col3 = st.columns(3)
-        with btn_col1: st.button("📋 Copiar")
-        with btn_col2: st.button("💾 Guardar")
-        with btn_col3: st.button("🖨️ Exportar")
-        
-        # Área de edición rica (Editable por el médico)
-        reporte_editable = st.text_area(
-            "Visualización del Reporte (Editable):",
-            value=st.session_state.reporte_final,
-            height=500
+        # EL EDITOR DE TEXTO ENRIQUECIDO
+        # Permite negritas, cursivas, subrayado, listas, enlaces, etc.
+        contenido_editado = st_quill(
+            value=st.session_state.reporte_generado,
+            placeholder="El informe aparecerá aquí. Puedes editar su formato, fuente y estilo libremente...",
+            html=True,
+            key="editor_quill"
         )
         
-        st.caption("Atajos: Ctrl+S (Guardar) | Ctrl+C (Copiar)")
+        if contenido_editado:
+            st.caption("✓ Los cambios en el formato se guardan automáticamente en este panel.")
 
 else:
-    st.warning("⚠️ Ingresa tu API Key en el panel izquierdo para activar la estación de trabajo.")
+    st.info("👈 Ingresa tu API Key de DeepSeek para desbloquear el espacio de trabajo.")
